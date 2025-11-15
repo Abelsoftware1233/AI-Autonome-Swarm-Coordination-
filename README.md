@@ -34,4 +34,5 @@ Het project bestaat uit drie hoofdscripts:
 ├── swarm_simulator.py      # Beheert de verzameling van drones, taakwachtrij en het toewijzingsalgoritme.
 └── main.py                 # Het uitvoerbare bestand dat de simulatie start en de stappen loopt.
 
-
+Aanbevolen Opstart:
+Om de live drone-coördinatie te starten, moet u alleen drone_run.py uitvoeren:
