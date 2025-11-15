@@ -1,5 +1,5 @@
 # AI-Autonome-Swarm-Coordination-
-Repository for the AI drones software for military purpose.
+Repository for the AI drones software for legal military purpose.
 
 # 🤖 AI Autonome Zwerm Coördinatie (Drone Swarm)
 
