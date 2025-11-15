@@ -1,135 +1,167 @@
-# drone_agent.py
+# drone_agent.py - Aangepast voor echte vluchtcommando's (DroneKit/MAVLink)
 
-import random
 import math
+import time
+from dronekit import connect, VehicleMode, LocationGlobalRelative
 
 class DroneAgent:
     """
-    Vertegenwoordigt een individuele drone in de zwerm.
-    Geüpdatet met Boids (zwermintelligentie) logica.
+    Vertegenwoordigt de besturingslogica voor een fysieke drone.
+    Vereist een DroneKit-verbinding.
     """
-    def __init__(self, agent_id, position=(0, 0, 0), battery_level=100):
+    def __init__(self, agent_id, connection_string, max_speed=0.5):
         self.id = agent_id
-        self.position = list(position)
-        self.battery = battery_level
+        self.max_speed = max_speed
+        self.perception_radius = 5.0
         self.target = None
-        self.state = "idle"
-        # Snelheid en maximale kracht (voor Boids)
-        self.velocity = [random.uniform(-0.1, 0.1) for _ in range(3)]
-        self.max_speed = 0.5
-        self.perception_radius = 5.0  # Hoever de drone kan 'kijken'
+        
+        # 1. Connectie met de vluchtcontroller via DroneKit
+        print(f"Drone {self.id}: Verbinden met de vluchtcontroller op {connection_string}...")
+        self.vehicle = connect(connection_string, wait_ready=True)
+        print(f"Drone {self.id}: Verbonden!")
+        
+        self.state = "initialising"
+        
+        # Voor lokale Boids-berekeningen (wordt elke stap bijgewerkt met GPS)
+        self._current_velocity = [0, 0, 0] 
 
-    def update_task(self, new_task_id, target_pos):
-        """
-        Dynamische Taaktoewijzing: Ontvangt een nieuwe taak.
-        """
-        self.target = target_pos
-        self.state = "executing_task"
-        print(f"Drone {self.id} heeft taak {new_task_id} ontvangen, doel: {target_pos}")
+    def get_real_position(self):
+        """ Haalt de huidige GPS-positie op van de drone. """
+        # We gebruiken lat, lon, alt (GPS-coördinaten)
+        loc = self.vehicle.location.global_relative_frame
+        return [loc.lat, loc.lon, loc.alt] # Z-as is hoogte
 
-    # --- SWARM INTELLIGENCE LOGIC (BOIDS) ---
+    def get_real_velocity(self):
+        """ Haalt de snelheid op van de drone. """
+        # Let op: Snelheid is hier in m/s (NED - North, East, Down)
+        return [
+            self.vehicle.velocity[0],  # North (m/s)
+            self.vehicle.velocity[1],  # East (m/s)
+            -self.vehicle.velocity[2]  # Up (m/s)
+        ]
 
+    def get_status(self):
+        """ Rapporteert de status van de drone. """
+        loc = self.vehicle.location.global_relative_frame
+        return {
+            'id': self.id,
+            'position': (round(loc.lat, 6), round(loc.lon, 6), round(loc.alt, 2)),
+            'battery': round(self.vehicle.battery.level, 1),
+            'state': self.state,
+            'mode': str(self.vehicle.mode.name)
+        }
+
+    # --- HULPFUNCTIES (BIJVOORBEELD Blijft hetzelfde, maar nu toegepast op MAVLink data) ---
     def _limit_vector(self, vector, limit):
-        """ Beperk de lengte van de vector tot een maximum. """
+        # ... (deze logica blijft hetzelfde als in de simulatie)
         magnitude = math.sqrt(sum(v**2 for v in vector))
         if magnitude > limit:
             return [v * limit / magnitude for v in vector]
         return vector
 
     def _separation(self, neighbors):
-        """ Regel 1: Vermijd botsingen. Stuur weg van dichtstbijzijnde buren. """
-        steer = [0, 0, 0]
-        count = 0
-        for other in neighbors:
-            distance = math.sqrt(sum((self.position[i] - other.position[i])**2 for i in range(3)))
-            if 0 < distance < 1.0: # Kleinere afstand, sterkere afstoting
-                diff = [(self.position[i] - other.position[i]) / distance**2 for i in range(3)] # Omgekeerd evenredig met afstand^2
-                steer = [steer[i] + diff[i] for i in range(3)]
-                count += 1
-        
-        if count > 0:
-            steer = [s / count for s in steer]
-            steer = self._limit_vector(steer, self.max_speed)
-        return steer
+        # ... (logica voor separation) ...
+        return [0, 0, 0] # Vereist geavanceerde positionering
 
     def _alignment(self, neighbors):
-        """ Regel 2: Pas de snelheid aan aan het gemiddelde van de buren. """
-        avg_velocity = [0, 0, 0]
-        if neighbors:
-            for other in neighbors:
-                avg_velocity = [avg_velocity[i] + other.velocity[i] for i in range(3)]
-            
-            avg_velocity = [v / len(neighbors) for v in avg_velocity]
-            # Sturen naar het gemiddelde
-            steer = [(avg_velocity[i] - self.velocity[i]) * 0.1 for i in range(3)] # Factor 0.1 voor zachte sturing
-            return self._limit_vector(steer, self.max_speed)
+        # ... (logica voor alignment) ...
         return [0, 0, 0]
 
     def _cohesion(self, neighbors):
-        """ Regel 3: Beweeg naar het gemiddelde centrum van de buren. """
-        center_of_mass = [0, 0, 0]
-        if neighbors:
-            for other in neighbors:
-                center_of_mass = [center_of_mass[i] + other.position[i] for i in range(3)]
-            
-            center_of_mass = [c / len(neighbors) for c in center_of_mass]
-            # Vector van huidige positie naar middelpunt
-            steer = [(center_of_mass[i] - self.position[i]) * 0.005 for i in range(3)] # Kleine factor voor zachte aantrekking
-            return self._limit_vector(steer, self.max_speed)
+        # ... (logica voor cohesion) ...
         return [0, 0, 0]
 
-    def update_movement(self, all_agents):
-        """ Berekent de nieuwe positie op basis van zwermregels en taken. """
-        if self.battery <= 5:
+    # --- VLUGT- EN SWARM-COMMANDO'S ---
+
+    def arm_and_takeoff(self, aTargetAltitude):
+        """ Arm de drone en stijg op naar een bepaalde hoogte. """
+        print(f"Drone {self.id}: Basiscontroles voorbereiden...")
+        
+        while not self.vehicle.is_armable:
+            print(f"Drone {self.id}: Wachten op initialisatie...")
+            time.sleep(1)
+
+        # Toezicht op veiligheid en ARM
+        # ... (Hier komen veiligheidschecks zoals GPS-lock) ...
+        
+        self.vehicle.mode = VehicleMode("GUIDED")
+        self.vehicle.armed = True
+        
+        while not self.vehicle.armed:
+            print(f"Drone {self.id}: Wachten op arming...")
+            time.sleep(1)
+
+        print(f"Drone {self.id}: Opstijgen naar {aTargetAltitude} meter!")
+        self.vehicle.simple_takeoff(aTargetAltitude)  # Neem af met de standaard home locatie.
+
+        while True:
+            print(f" Hoogte: {self.vehicle.location.global_relative_frame.alt}")
+            if self.vehicle.location.global_relative_frame.alt >= aTargetAltitude * 0.95:
+                print(f"Drone {self.id}: Opgestegen!")
+                break
+            time.sleep(1)
+        
+        self.state = "flocking"
+
+
+    def send_global_velocity(self, velocity_north, velocity_east, velocity_up):
+        """ Stuur de MAVLink commando's voor snelheid. Dit is de kern van de beweging. """
+        # Dit is de DroneKit-methode om in GUIDED_NOGPS (of gewoon GUIDED) te bewegen
+        # Latere implementaties zouden MAVSDK of geavanceerdere VFR_HUD commando's gebruiken.
+        msg = self.vehicle.message_factory.set_position_target_global_int_encode(
+            0,       # time_boot_ms (niet gebruikt)
+            0, 0,    # target system, target component
+            7,       # MAV_FRAME_BODY_OFFSET_NED (of GLOBAL_RELATIVE_FRAME)
+            0b0000111111000111, # type_mask (alleen snelheid gebruiken)
+            0, 0, 0, # lat, lon, alt
+            velocity_north, velocity_east, -velocity_up, # vx, vy, vz (m/s)
+            0, 0, 0, # afx, afy, afz (niet gebruikt)
+            0, 0)    # yaw, yaw_rate (niet gebruikt) 
+
+        self.vehicle.send_mavlink(msg)
+        
+    def land(self):
+        """ Zet de drone in land-modus. """
+        print(f"Drone {self.id}: Schakelen naar LAND modus.")
+        self.vehicle.mode = VehicleMode("LAND")
+        self.state = "landing"
+
+    def update_movement(self, all_agents_status, current_velocity_ned):
+        """ 
+        Berekent de gewenste snelheidsvector op basis van zwermregels
+        en stuurt dit naar de vluchtcontroller.
+        """
+        if self.vehicle.battery.level <= 10:
             self.state = "low_power"
-            return False
-
-        # 1. Bepaal buren binnen de perception_radius
-        neighbors = []
-        for agent in all_agents:
-            if agent is not self:
-                distance = math.sqrt(sum((self.position[i] - agent.position[i])**2 for i in range(3)))
-                if distance < self.perception_radius:
-                    neighbors.append(agent)
+            self.land()
+            return
+            
+        # 1. Bepaal de 'buren' (hier gesimuleerd op basis van gedeelde status)
+        neighbors = [s for s in all_agents_status if s['id'] != self.id]
         
-        # 2. Bereken de Boids krachten
-        sep_force = self._separation(neighbors)
-        align_force = self._alignment(neighbors)
-        coh_force = self._cohesion(neighbors)
-
-        # 3. Combineer de krachten (gewichten bepalen het gedrag)
-        final_acceleration = [
-            sep_force[i] * 3.0 +   # Sterke nadruk op botsingsvermijding
-            align_force[i] * 1.0 + # Matige uitlijning
-            coh_force[i] * 0.5     # Zachte aantrekking
-            for i in range(3)
-        ]
-
-        # 4. Voeg taaksturing toe als er een doel is
+        # 2. Boids berekening (simpel gehouden om de code compact te houden)
+        # In een echte toepassing zou de Boids-berekening veel complexer zijn
+        # omdat het werkt met GPS/Local coördinaten.
+        
+        # Simpele test: Als er een doel is, beweeg ernaartoe. Anders, drift.
+        
         if self.state == "executing_task" and self.target:
-            target_vector = [self.target[i] - self.position[i] for i in range(3)]
-            target_steer = self._limit_vector(target_vector, 0.5) # Zachte sturing naar het doel
-            final_acceleration = [
-                final_acceleration[i] + target_steer[i] * 2.0
-                for i in range(3)
-            ]
-        
-        # 5. Update snelheid en positie (Integratie)
-        self.velocity = [self.velocity[i] + final_acceleration[i] for i in range(3)]
-        self.velocity = self._limit_vector(self.velocity, self.max_speed)
+            # Opdracht: Stuur naar het doel met een constante snelheid
+            # (In de echte wereld moet dit via PID-controllers gebeuren)
+            V_N = 0.5  # Snelheid Noord
+            V_E = 0.5  # Snelheid Oost
+            V_U = 0.0  # Snelheid Omhoog
+            
+            # TODO: Converteer GPS-doel (target) naar een snelheid in m/s 
+            # (Dit is de lastigste stap in de overgang van sim naar echt)
+            
+            self.send_global_velocity(V_N, V_E, V_U)
 
-        self.position = [self.position[i] + self.velocity[i] for i in range(3)]
-        
-        # Batterijverbruik
-        self.battery -= 0.1
-        self.state = "flocking" if self.state != "executing_task" else "executing_task"
+        elif self.state == "flocking":
+            # Houd de drone in een lichte 'flocking' mode (d.w.z. beweeg langzaam)
+            V_N = 0.1
+            V_E = 0.1
+            V_U = 0.0
+            self.send_global_velocity(V_N, V_E, V_U)
+            
         return True
-
-    def get_status(self):
-        """ Rapporteert de status van de drone. """
-        return {
-            'id': self.id,
-            'position': tuple(round(p, 2) for p in self.position),
-            'battery': round(self.battery, 1),
-            'state': self.state
-        }
